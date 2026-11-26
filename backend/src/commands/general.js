@@ -100,11 +100,11 @@ const resolveStatus = (quoted) => {
 
 export default [
   {
-    name: 'menu',
+    name: 'botmenu',
     aliases: ['help', 'commands'],
     category: 'general',
     description: 'Show this menu',
-    usage: '.menu',
+    usage: '.botmenu',
 
     async execute(ctx) {
       const { config, commands, service } = ctx;

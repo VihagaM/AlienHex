@@ -1,7 +1,11 @@
+import { createWriteStream } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 /**
- * LogHub keeps a ring buffer of recent log entries and streams each new entry
- * to every connected dashboard through Socket.io.
+ * LogHub keeps a ring buffer, appends entries to a text file, and streams each
+ * new entry to every connected dashboard through Socket.io.
  */
+const logFilePath = fileURLToPath(new URL('../logs.txt', import.meta.url));
 const COLORS = {
   info: '\x1b[36m',
   success: '\x1b[32m',
@@ -17,6 +21,10 @@ class LogHub {
     this.buffer = [];
     this.io = null;
     this.counter = 0;
+    this.fileStream = createWriteStream(logFilePath, { flags: 'a' });
+    this.fileStream.on('error', (err) => {
+      console.error(`Could not write log file ${logFilePath}: ${err.message}`);
+    });
   }
 
   attach(io) {
@@ -40,6 +48,7 @@ class LogHub {
     const color = COLORS[level] || '';
     console.log(`${color}[${entry.ts.slice(11, 19)}] ${level.toUpperCase().padEnd(7)}\x1b[0m ${entry.message}`);
 
+    this.fileStream.write(`[${entry.ts}] ${level.toUpperCase()} ${entry.message}\n`);
     this.io?.emit('log', entry);
     return entry;
   }

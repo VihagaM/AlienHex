@@ -15,6 +15,10 @@ import { isParticipantAdmin } from './utils/helpers.js';
 
 const baileysLogger = pino({ level: config.baileysLogLevel });
 const MAX_MESSAGE_LENGTH = 2500;
+const SPAM_WINDOW_MS = 5000;
+const MAX_MESSAGES_PER_WINDOW = 3;
+const PROCESSED_MESSAGE_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_PROCESSED_MESSAGE_IDS = 10_000;
 const GROUP_LINK_FILTER_JID = '120363422465751631@g.us';
 const LINK_PATTERN =
   /(?:https?|ftp):\/\/|www\.|chat\.whatsapp\.com|(?<![@\w.-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}(?::\d{2,5})?(?:[/?#]\S*)?/i;
@@ -78,6 +82,11 @@ export class WhatsAppService {
     this.reconnectTimer = null;
     this.reconnectAttempts = 0;
     this.statsTimer = null;
+    this.recentMessages = new Map();
+    this.processedMessageIds = new Map();
+    this.messageCache = new Map();
+    this.deletedMessages = new Map();
+    this.connectedAt = 0;
 
     this.startedAt = Date.now();
     this.state = { status: 'disconnected', qr: null, user: null, reason: null };
@@ -128,6 +137,58 @@ export class WhatsAppService {
     this.scheduleStatsEmit();
   }
 
+  cacheReceivedMessage(msg) {
+    if (!msg?.key?.remoteJid || !msg.key.id || !msg.message) return;
+
+    const chatMessages = this.messageCache.get(msg.key.remoteJid) || new Map();
+    chatMessages.set(msg.key.id, msg);
+    if (chatMessages.size > 250) {
+      chatMessages.delete(chatMessages.keys().next().value);
+    }
+    this.messageCache.set(msg.key.remoteJid, chatMessages);
+  }
+
+  recordDeletedMessage(jid, messageId, fallbackKey) {
+    if (!jid || !messageId) return;
+
+    const original = this.messageCache.get(jid)?.get(messageId);
+    if (!original) return;
+
+    const deleted = this.deletedMessages.get(jid) || new Map();
+    deleted.set(messageId, { msg: original, deletedAt: Date.now(), key: fallbackKey });
+    if (deleted.size > 100) {
+      deleted.delete(deleted.keys().next().value);
+    }
+    this.deletedMessages.set(jid, deleted);
+  }
+
+  getDeletedMessage(jid, messageId) {
+    const deleted = this.deletedMessages.get(jid);
+    if (!deleted) return null;
+    if (messageId) return deleted.get(messageId) || null;
+
+    const latestId = [...deleted.keys()].at(-1);
+    return latestId ? deleted.get(latestId) : null;
+  }
+
+  isSpamMessage(senderJid, content, timestamp = Date.now()) {
+    if (!content.trim()) return false;
+
+    for (const [sender, messages] of this.recentMessages) {
+      const recentMessages = messages.filter(
+        (message) => timestamp - message.timestamp < SPAM_WINDOW_MS,
+      );
+      if (recentMessages.length) this.recentMessages.set(sender, recentMessages);
+      else this.recentMessages.delete(sender);
+    }
+
+    const senderMessages = this.recentMessages.get(senderJid) || [];
+    senderMessages.push({ senderJid, content, timestamp });
+    this.recentMessages.set(senderJid, senderMessages);
+
+    return senderMessages.length > MAX_MESSAGES_PER_WINDOW;
+  }
+
   /* ───────────── Lifecycle ───────────── */
 
   async start() {
@@ -166,6 +227,9 @@ export class WhatsAppService {
       sock.ev.on('creds.update', saveCreds);
       sock.ev.on('connection.update', (update) => this.onConnectionUpdate(sock, update));
       sock.ev.on('messages.upsert', (payload) => this.onMessages(sock, payload));
+      sock.ev.on('messages.update', (updates) => {
+        if (sock === this.sock) this.onMessageUpdates(updates);
+      });
     } catch (err) {
       this.sock = null;
       log.error(`Failed to start WhatsApp: ${err.message}`);
@@ -186,6 +250,7 @@ export class WhatsAppService {
     }
 
     if (connection === 'open') {
+      this.connectedAt = Date.now();
       this.reconnectAttempts = 0;
       this.setState({ status: 'connected', qr: null, user: sock.user ?? null, reason: null });
       log.success(`Connected as ${sock.user?.name || sock.user?.id || 'unknown'}`);
@@ -272,20 +337,72 @@ export class WhatsAppService {
 
   /* ───────────── Incoming messages ───────────── */
 
+  onMessageUpdates(updates) {
+    for (const update of updates) {
+      const protocol = update.update?.message?.protocolMessage;
+      const protocolKey = protocol?.key;
+      const isRevoke =
+        protocol?.type === 0 ||
+        update.update?.messageStubType === 1;
+
+      if (!isRevoke) continue;
+
+      const key = {
+        remoteJid: update.key?.remoteJid || protocolKey?.remoteJid,
+        participant: update.key?.participant || protocolKey?.participant,
+        id: protocolKey?.id || update.key?.id,
+      };
+      if (!key?.remoteJid || !key.id) continue;
+      this.recordDeletedMessage(key.remoteJid, key.id, key);
+    }
+  }
+
   async onMessages(sock, { messages, type }) {
     if (sock !== this.sock || type !== 'notify') return;
 
+    const isWarmupWindow = Date.now() - this.connectedAt < 10_000;
+    const maxMessageAgeSeconds = Math.min(config.maxMessageAgeSeconds ?? 20, 20);
+
     for (const msg of messages) {
+      const receivedAt = Date.now();
+      for (const [oldestId, processedAt] of this.processedMessageIds) {
+        if (receivedAt - processedAt <= PROCESSED_MESSAGE_TTL_MS) break;
+        this.processedMessageIds.delete(oldestId);
+      }
+
+      const messageId = msg.key.id;
+      if (messageId) {
+        const dedupeKey = `${msg.key.remoteJid || ''}:${msg.key.participant || ''}:${messageId}`;
+        if (this.processedMessageIds.has(dedupeKey)) continue;
+        this.processedMessageIds.set(dedupeKey, receivedAt);
+        if (this.processedMessageIds.size > MAX_PROCESSED_MESSAGE_IDS) {
+          const oldestId = this.processedMessageIds.keys().next().value;
+          this.processedMessageIds.delete(oldestId);
+        }
+      }
+
       if (!msg.message) continue;
       if (msg.key.remoteJid === 'status@broadcast') continue;
+      this.cacheReceivedMessage(msg);
 
       const timestamp = Number(msg.messageTimestamp?.low ?? msg.messageTimestamp ?? 0);
-      if (timestamp && Date.now() / 1000 - timestamp > config.maxMessageAgeSeconds) continue;
+      const messageAgeSeconds = Math.floor(Date.now() / 1000) - timestamp;
+      if (timestamp && messageAgeSeconds > maxMessageAgeSeconds) continue;
 
       this.stats.messagesReceived++;
       this.scheduleStatsEmit();
 
       const text = extractMessageText(msg.message);
+      const senderJid =
+        msg.key.participant || (msg.key.fromMe ? sock.user?.id : null) || msg.key.remoteJid;
+      if (!msg.key.fromMe && !isWarmupWindow) {
+        if (this.isSpamMessage(senderJid, text)) {
+          log.warn(`[!] Spam flood detected from ${senderJid}`);
+          await revokeMessage(sock, msg, this, 'spam flood');
+          continue;
+        }
+      }
+
       const suspiciousReasons = inspectMessage(text);
       if (suspiciousReasons.length) {
         await revokeMessage(sock, msg, this, `suspicious (${suspiciousReasons.join(', ')})`);
@@ -293,18 +410,7 @@ export class WhatsAppService {
       }
 
       const jid = msg.key.remoteJid;
-      if (jid === GROUP_LINK_FILTER_JID && !msg.key.fromMe && LINK_PATTERN.test(text)) {
-        try {
-          const metadata = await sock.groupMetadata(jid);
-          if (msg.key.participant && isParticipantAdmin(metadata.participants, msg.key.participant)) continue;
-        } catch (err) {
-          this.recordError();
-          log.warn(`Could not verify admin status for linked message ${msg.key.id || '(unknown id)'}: ${err.message}`);
-          continue;
-        }
-        await revokeMessage(sock, msg, this, 'non-admin link');
-        continue;
-      }
+      
 
       try {
         await handleMessage({ sock, msg, service: this });

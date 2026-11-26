@@ -43,14 +43,14 @@ async function participantAction(ctx, action, title) {
 const adminCommand = { category: 'group', groupOnly: true, adminOnly: true, botAdminRequired: true };
 
 export default [
-  {
-    ...adminCommand,
-    name: 'kick',
-    aliases: ['remove'],
-    description: 'Remove a member',
-    usage: '.kick @user',
-    execute: (ctx) => participantAction(ctx, 'remove', '🚪 Remove Member'),
-  },
+  // {
+  //   ...adminCommand,
+  //   name: 'kick',
+  //   aliases: ['remove'],
+  //   description: 'Remove a member',
+  //   usage: '.kick @user',
+  //   execute: (ctx) => participantAction(ctx, 'remove', '🚪 Remove Member'),
+  // },
   {
     ...adminCommand,
     name: 'add',
@@ -58,53 +58,53 @@ export default [
     usage: '.add @user',
     execute: (ctx) => participantAction(ctx, 'add', '➕ Add Member'),
   },
-  {
-    ...adminCommand,
-    name: 'promote',
-    description: 'Promote a member to admin',
-    usage: '.promote @user',
-    execute: (ctx) => participantAction(ctx, 'promote', '⬆️ Promote Member'),
-  },
-  {
-    ...adminCommand,
-    name: 'demote',
-    description: 'Demote an admin to member',
-    usage: '.demote @user',
-    execute: (ctx) => participantAction(ctx, 'demote', '⬇️ Demote Admin'),
-  },
-  {
-    ...adminCommand,
-    name: 'mute',
-    description: 'Only admins can send messages',
-    usage: '.mute',
-    async execute(ctx) {
-      await ctx.sock.groupSettingUpdate(ctx.jid, 'announcement');
-      await ctx.reply('🔇 Group muted — only admins can send messages now.');
-    },
-  },
-  {
-    ...adminCommand,
-    name: 'unmute',
-    description: 'Let everyone send messages',
-    usage: '.unmute',
-    async execute(ctx) {
-      await ctx.sock.groupSettingUpdate(ctx.jid, 'not_announcement');
-      await ctx.reply('🔊 Group unmuted — everyone can send messages.');
-    },
-  },
-  {
-    category: 'group',
-    groupOnly: true,
-    adminOnly: true,
-    name: 'tagall',
-    aliases: ['everyone'],
-    description: 'Mention every member',
-    usage: '.tagall [message]',
-    async execute(ctx) {
-      const { participants, subject } = await ctx.getGroupMetadata();
-      const lines = participants.map((p) => `◈ @${jidToNumber(p.id)}`);
-      const text = [`📢 *Attention — ${subject}*`, ctx.text ? `\n💬 ${ctx.text}` : '', '', ...lines].join('\n');
-      await ctx.reply(text, { mentions: participants.map((p) => p.id) });
-    },
-  },
+  // {
+  //   ...adminCommand,
+  //   name: 'promote',
+  //   description: 'Promote a member to admin',
+  //   usage: '.promote @user',
+  //   execute: (ctx) => participantAction(ctx, 'promote', '⬆️ Promote Member'),
+  // },
+  // {
+  //   ...adminCommand,
+  //   name: 'demote',
+  //   description: 'Demote an admin to member',
+  //   usage: '.demote @user',
+  //   execute: (ctx) => participantAction(ctx, 'demote', '⬇️ Demote Admin'),
+  // },
+  // {
+  //   ...adminCommand,
+  //   name: 'mute',
+  //   description: 'Only admins can send messages',
+  //   usage: '.mute',
+  //   async execute(ctx) {
+  //     await ctx.sock.groupSettingUpdate(ctx.jid, 'announcement');
+  //     await ctx.reply('🔇 Group muted — only admins can send messages now.');
+  //   },
+  // },
+  // {
+  //   ...adminCommand,
+  //   name: 'unmute',
+  //   description: 'Let everyone send messages',
+  //   usage: '.unmute',
+  //   async execute(ctx) {
+  //     await ctx.sock.groupSettingUpdate(ctx.jid, 'not_announcement');
+  //     await ctx.reply('🔊 Group unmuted — everyone can send messages.');
+  //   },
+  // },
+  // {
+  //   category: 'group',
+  //   groupOnly: true,
+  //   adminOnly: true,
+  //   name: 'tagall',
+  //   aliases: ['everyone'],
+  //   description: 'Mention every member',
+  //   usage: '.tagall [message]',
+  //   async execute(ctx) {
+  //     const { participants, subject } = await ctx.getGroupMetadata();
+  //     const lines = participants.map((p) => `◈ @${jidToNumber(p.id)}`);
+  //     const text = [`📢 *Attention — ${subject}*`, ctx.text ? `\n💬 ${ctx.text}` : '', '', ...lines].join('\n');
+  //     await ctx.reply(text, { mentions: participants.map((p) => p.id) });
+  //   },
+  // },
 ];
